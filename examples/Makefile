@@ -32,7 +32,9 @@ TARGET_BIN = \
        $(BINDIR)/advdiff \
        $(BINDIR)/advdiff-ss \
        $(BINDIR)/merge \
+       $(BINDIR)/field-set \
        $(BINDIR)/cubic
+
 
 all : $(TARGET_BIN)
 
