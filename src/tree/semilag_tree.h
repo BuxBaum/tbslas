@@ -96,8 +96,8 @@ void SolveSemilagTree(TreeType& tvel_curr,
   pvfmm::Profile::Toc();
 }
 
-template <class TreeType>
-void SolveSemilagInSitu(TreeType& tvel_curr,
+template <class TreeType, class FieldType>
+void SolveSemilagInSitu(FieldType& vel_field,
                         TreeType& tree_curr,
                         const int timestep,
                         const typename TreeType::Real_t dt,
@@ -131,7 +131,7 @@ void SolveSemilagInSitu(TreeType& tvel_curr,
   ////////////////////////////////////////////////////////////////////////
   int num_points_local_nodes = points_pos_all_nodes.size()/sdim;
   std::vector<RealType> points_val_local_nodes(num_points_local_nodes*data_dof);
-  tbslas::SolveSemilagRK2(tbslas::NodeFieldFunctor<RealType,TreeType>(&tvel_curr),
+  tbslas::SolveSemilagRK2(vel_field,
                           tbslas::NodeFieldFunctor<RealType,TreeType>(&tree_curr),
                           points_pos_all_nodes,
                           sdim,
@@ -290,7 +290,8 @@ RunSemilagSimulationInSitu(TreeType* vel_tree,
       printf("dt: %f tstep: %d \n", dt, tstep);
       printf("============================\n");
     }
-    tbslas::SolveSemilagInSitu<TreeType>(*vel_tree,
+    tbslas::NodeFieldFunctor<RealType,TreeType> vel_field(vel_tree);
+    tbslas::SolveSemilagInSitu<TreeType>(vel_field,
                                          *tconc_curr,
                                          tstep,
                                          dt,

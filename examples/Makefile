@@ -28,6 +28,7 @@ INCDIR = ./include
 TARGET_BIN = \
        $(BINDIR)/semilag_tree \
        $(BINDIR)/advection  \
+       $(BINDIR)/advection-timedep  \
        $(BINDIR)/diffusion \
        $(BINDIR)/advdiff \
        $(BINDIR)/advdiff-ss \

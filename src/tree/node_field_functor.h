@@ -263,6 +263,13 @@ class NodeFieldFunctor {
     pvfmm::Profile::Toc();
   }
 
+  void operator () (const real_t* points_pos,
+                    int num_points,
+                    real_t time,
+                    real_t* out) {
+    (*this)(points_pos, num_points, out);
+  }
+
  private:
   NodeType* node_;
 };

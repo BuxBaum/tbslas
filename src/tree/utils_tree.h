@@ -352,10 +352,10 @@ MergeTreeRefinement(TreeType& tree_in,
   std::vector<pvfmm::MortonId> mins_out;
   GetTreeMortonIdMins(tree_out, mins_out);
 
-  size_t range[2]={0,np};
+  int range[2]={0,np};
   range[0]=std::lower_bound(&mins_in[0], &mins_in[np], mins_out[myrank  ])-&mins_in[0];
   if(myrank<np-1) range[1]=std::lower_bound(&mins_in[0], &mins_in[np], mins_out[myrank+1])-&mins_in[0];
-  for(size_t i=range[0];i<range[1];i++) tree_out.FindNode(mins_in[i],true,NULL);
+  for(int i=range[0];i<range[1];i++) tree_out.FindNode(mins_in[i],true,NULL);
 
   tree_out.RedistNodes(&mins_in[myrank]);
 
@@ -403,10 +403,10 @@ SyncTreeRefinement(TreeType& tree_in,
   std::vector<pvfmm::MortonId> mins_out;
   GetTreeMortonIdMins(tree_out, mins_out);
 
-  size_t range[2]={0,np};
+  int range[2]={0,np};
   range[0]=std::lower_bound(&mins_in[0], &mins_in[np], mins_out[myrank  ])-&mins_in[0];
   if(myrank<np-1) range[1]=std::lower_bound(&mins_in[0], &mins_in[np], mins_out[myrank+1])-&mins_in[0];
-  for(size_t i=range[0];i<range[1];i++) tree_out.FindNode(mins_in[i],true,NULL);
+  for(int i=range[0];i<range[1];i++) tree_out.FindNode(mins_in[i],true,NULL);
 
   tree_out.RedistNodes(&mins_in[myrank]);
 

@@ -33,13 +33,11 @@ IntegrateRK2(FieldFunctor field_fn,
   std::vector<real_t> xtmp(xinit.size());
   std::vector<real_t> vtmp(xinit.size());
 
-  // FIXME: currently only time independent
-  field_fn(xinit.data(), num_points, vtmp.data());
+  field_fn(xinit.data(), num_points, tinit, vtmp.data());
   for (int i = 0; i < xinit.size(); i++)
     xtmp[i] = xinit[i] + 0.5*dt*vtmp[i];
 
-  // FIXME: currently only time independent
-  field_fn(xtmp.data(), num_points, vtmp.data());
+  field_fn(xtmp.data(), num_points, tinit+0.5*dt, vtmp.data());
   for (int i = 0; i < xinit.size(); i++)
     xsol[i] = xinit[i] + dt*vtmp[i];
 
