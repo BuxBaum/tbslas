@@ -200,12 +200,12 @@ get_gaussian_field_cylinder(const real_t* points_pos,
   real_t c = sin_theta_2*0.5/sigma_x_2 + cos_theta_2*0.5/sigma_y_2;
 
   for (int i = 0; i < num_points; i++) {
-    out[i]  =
-        A*exp(-(a * (points_pos[i*sdim+0]-xc) * (points_pos[i*sdim+0]-xc) +
-                b * (points_pos[i*sdim+0]-xc) * (points_pos[i*sdim+1]-yc) +
-                c * (points_pos[i*sdim+1]-yc) * (points_pos[i*sdim+1]-yc)
-                )
-              );
+    out[i]  = 0;
+        // A*exp(-(a * (points_pos[i*sdim+0]-xc) * (points_pos[i*sdim+0]-xc) +
+        //         b * (points_pos[i*sdim+0]-xc) * (points_pos[i*sdim+1]-yc) +
+        //         c * (points_pos[i*sdim+1]-yc) * (points_pos[i*sdim+1]-yc)
+        //         )
+        //       );
   }
 }
 

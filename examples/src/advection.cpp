@@ -356,11 +356,14 @@ int main (int argc, char **argv) {
           // SOLVE SEMILAG
           // ===================================================================
           pvfmm::Profile::Tic(std::string("SL_TN" + tbslas::ToString(static_cast<long long>(timestep))).c_str(), &sim_config->comm, false, 5);
+          tcurr = (timestep-1)*sim_config->dt;
           tbslas::SolveSemilagInSitu(tvel,
                                      tcon,
                                      timestep,
                                      sim_config->dt,
-                                     sim_config->num_rk_step);
+                                     sim_config->num_rk_step,
+                                     fn_con
+                                     );
           pvfmm::Profile::Toc();
 
           // ===================================================================
