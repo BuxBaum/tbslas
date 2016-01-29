@@ -101,7 +101,8 @@ void SolveSemilagInSitu(TreeType& tvel_curr,
                         const int timestep,
                         const typename TreeType::Real_t dt,
                         int num_rk_step,
-                        FunctorType conc_evaluator) {
+                        FunctorType conc_evaluator,
+                        FunctorType velo_evaluator) {
   typedef typename TreeType::Node_t NodeType;
   typedef typename TreeType::Real_t RealType;
   tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
@@ -139,7 +140,7 @@ void SolveSemilagInSitu(TreeType& tvel_curr,
   //                         num_rk_step,
   //                         points_val_local_nodes);
 
-  tbslas::SolveSemilagRK2(tbslas::NodeFieldFunctor<RealType,TreeType>(&tvel_curr),
+  tbslas::SolveSemilagRK2(velo_evaluator,
                           conc_evaluator,
                           points_pos_all_nodes,
                           sdim,

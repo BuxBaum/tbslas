@@ -362,7 +362,8 @@ int main (int argc, char **argv) {
                                      timestep,
                                      sim_config->dt,
                                      sim_config->num_rk_step,
-                                     fn_con
+                                     fn_con,
+                                     fn_vel
                                      );
           pvfmm::Profile::Toc();
 
