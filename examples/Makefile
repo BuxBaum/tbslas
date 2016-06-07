@@ -49,12 +49,15 @@ NVCC          := $(NVCC_PVFMM)
 
 
 $(BINDIR)/example-gaussian:  $(OBJDIR)/example-gaussian.o $(CUOBJDIR)/runge-kutta.o
+	-@$(MKDIRS) $(dir $@)
 	$(CXX_PVFMM) $(CXXFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) $(CUDA_LDLIBS_PVFMM) $^ $(LDFLAGS_PVFMM) -o $@
 
 $(BINDIR)/chebEval:  $(OBJDIR)/chebEval.o $(CUOBJDIR)/chebEvalCuda.o $(CUOBJDIR)/runge-kutta.o
+	-@$(MKDIRS) $(dir $@)
 	$(CXX_PVFMM) $(CXXFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) $(CUDA_LDLIBS_PVFMM) $^ $(LDFLAGS_PVFMM) -o $@
 
 $(CUOBJDIR)/%.o: $(SRCDIR)/%.cu
+	-@$(MKDIRS) $(dir $@)
 	$(NVCC) $(NVCCFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) -I$(INCDIR) $(TBSLAS_INC) -c $^ -o $@   
 ##
 
