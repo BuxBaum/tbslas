@@ -12,12 +12,13 @@ ifndef CXXFLAGS_PVFMM
 $(error Cannot find file: MakeVariables)
 endif
 
-CUDA_INCLUDES = -I/usr/local/cuda-7.5/samples/common/inc
+CUDA_INCLUDES = -I/lrz/sys/parallel/cuda/6.5/sdk/common/inc  #set accordingly (folder with helper_cuda.h and helper_functions.h)
 
 TBSLAS_INC = -I$(TBSLAS_DIR)/src $(CUDA_INCLUDES)
 # TBSLAS_LIBS = -ltricubic
 # TBSLAS_LDLIBS = -L$(TBSLAS_DIR)/ext/tricubic $(TBSLAS_LIBS)
 # CXXFLAGS_TBSLAS = -std=c++0x
+
 
 RM = rm -f
 MKDIRS = mkdir -p
@@ -26,6 +27,7 @@ BINDIR = ./bin
 SRCDIR = ./src
 OBJDIR = ./obj
 INCDIR = ./include
+##
 CUOBJDIR = ./cudaobj
 
 TARGET_BIN = \
@@ -51,19 +53,24 @@ all : $(TARGET_BIN)
 HOST_COMPILER = mpic++
 NVCC          := $(NVCC_PVFMM)
 
-
-$(BINDIR)/example-gaussian:  $(OBJDIR)/example-gaussian.o $(CUOBJDIR)/runge-kutta.o
+##
+$(BINDIR)/example-gaussian:  $(OBJDIR)/example-gaussian.o  $(CUOBJDIR)/runge-kutta.o
 	-@$(MKDIRS) $(dir $@)
 	$(CXX_PVFMM) $(CXXFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) $(CUDA_LDLIBS_PVFMM) $^ $(LDFLAGS_PVFMM) -o $@
-
+##
 $(BINDIR)/chebEval:  $(OBJDIR)/chebEval.o $(CUOBJDIR)/chebEvalCuda.o $(CUOBJDIR)/runge-kutta.o
 	-@$(MKDIRS) $(dir $@)
-	$(CXX_PVFMM) $(CXXFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) $(CUDA_LDLIBS_PVFMM) $^ $(LDFLAGS_PVFMM) -o $@
+	$(CXX_PVFMM) $(CXXFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) $(CUDA_LDLIBS_PVFMM) $^ $(LDFLAGS_PVFMM) -lcusparse -o $@
 
 $(CUOBJDIR)/%.o: $(SRCDIR)/%.cu
 	-@$(MKDIRS) $(dir $@)
-	$(NVCC) $(NVCCFLAGS_PVFMM) $(CXXFLAGS_TBSLAS) -I$(INCDIR) $(TBSLAS_INC) -c $^ -o $@   
+	$(NVCC) $(NVCCFLAGS_PVFMM) -lineinfo -gencode arch=compute_20,code=sm_20 $(CXXFLAGS_TBSLAS) -I$(INCDIR) $(TBSLAS_INC) -c $^ -o $@   
+# add -lineinfo for source file mapping 
+# add -maxrregcount for register limiting
+# add -Xptxas=-v : show register usage
+# set -gencode arch=compute_20,code=sm_20 according to GPU architecture
 ##
+
 
 ifeq ($(INTEL_OFFLOAD_OK),yes)
 
@@ -90,6 +97,10 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
 	$(CXX_PVFMM) $(CXXFLAGS_PVFMM) $(CXXFLAGS_TBSLAS)                 -I$(INCDIR) $(TBSLAS_INC) -c $^ -o $@
 
 endif
+
+
+
+
 
 clean:
 	$(RM) -r $(BINDIR)/* $(OBJDIR)/*

@@ -10,8 +10,11 @@
 // limitations under the License.
 // *************************************************************************
 
-#ifndef SRC_TREE_NODE_FIELD_FUNCTOR_H_
-#define SRC_TREE_NODE_FIELD_FUNCTOR_H_
+// edited 2016 by Benedikt Kucis for CUDA support
+
+
+#ifndef SRC_TREE_NODE_FIELD_FUNCTOR_H_CUDA_VEC_
+#define SRC_TREE_NODE_FIELD_FUNCTOR_H_CUDA_VEC_
 
 #include <vector>
 #include <cmath>
@@ -22,10 +25,16 @@
 #include <ompUtils.h>
 
 #include "utils/common.h"
+#include "chebEval.h"
+#include "cusparse.h"
+
+#define NUMTHREADS 512
+
 
 namespace pvfmm {
+// original CPU implementation	
 template <class Real, class Vec = Real>
-void vec_eval(int n, int d0, int d, int dof, Real *px, Real *py, Real *pz,
+void vec_eval_original(int n, int d0, int d, int dof, Real *px, Real *py, Real *pz,
               Real *coeff, Real *tmp_out) {
   const int VecLen = sizeof(Vec) / sizeof(Real);
 	
@@ -85,8 +94,142 @@ void vec_eval(int n, int d0, int d, int dof, Real *px, Real *py, Real *pz,
 
 namespace tbslas {
 
+
+/**
+ * Calls GPU functions for the evaluation
+ * Handles data transfers
+ * Returns evaluated values
+ * n : number of points
+ * d : Chebyshev degree +1
+ * dof : dimensions of the tree data
+ * coords : coordinates
+ * d_coeff : pointer to coefficients in device memory
+ * tmp_out : output buffer
+ * pointnode : the node a point lies in
+ */
 template <class Real_t>
-void fast_interp(const std::vector<Real_t>& reg_grid_vals, int data_dof,
+void vec_eval_cuda (int n, int d, int dof, Real_t* coords,
+				 Real_t* d_coeff, Real_t* tmp_out, int* pointnode)
+{
+	tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
+	MPI_Comm* comm = &sim_config->comm;
+	
+	// pin coordinate und pointnode buffers for concurrent copying
+	pvfmm::Profile::Tic("Pin Memory", &sim_config->comm, false, 5);
+	cudaHostRegister(coords, n*3*sizeof(Real_t), 0);	
+	cudaHostRegister(pointnode, n*sizeof(int), 0);	
+	pvfmm::Profile::Toc();
+	
+	
+	// create streams for concurrent copying and execution
+	pvfmm::Profile::Tic("Create Streams", &sim_config->comm, false, 5);
+	cudaStream_t streams[4];
+	for (int i = 0; i < 4; ++i)
+		cudaStreamCreate(&streams[i]);	
+	pvfmm::Profile::Toc();
+	
+	pvfmm::Profile::Tic("Allocate GPU Memory", &sim_config->comm, false, 5);
+	// allocate GPU memory
+	Real_t* d_coords = NULL;
+	Real_t* d_poly_x = NULL;
+	Real_t* d_poly_y = NULL;
+	Real_t* d_poly_z = NULL;
+	Real_t* d_out = NULL;
+	
+	int* d_pointnode = NULL;
+			
+	int numcoeffs = d * (d+1) * (d+2) * dof/ 6;		
+
+	unsigned int mem_size_in = sizeof(Real_t) * (n) * 3;
+	unsigned int mem_size_in_alloc = sizeof(Real_t) * (n+NUMTHREADS) * 3; // larger buffer for safe reordering
+    unsigned int mem_size_poly = sizeof(Real_t) * d * n;
+    unsigned int mem_size_out = sizeof(Real_t) * n * dof;
+    
+    unsigned int mem_size_pointnode = sizeof(int) * n;   
+    
+    unsigned int mem_size_single = sizeof(Real_t) * n;  
+                   
+    checkCudaErrors(cudaMalloc((void**) &d_coords, mem_size_in_alloc)); 
+	checkCudaErrors(cudaMalloc((void**) &d_poly_x, mem_size_poly)); 
+	checkCudaErrors(cudaMalloc((void**) &d_poly_y, mem_size_poly));
+	checkCudaErrors(cudaMalloc((void**) &d_poly_z, mem_size_poly));  
+	checkCudaErrors(cudaMalloc((void**) &d_out, mem_size_out));
+	checkCudaErrors(cudaMalloc((void**) &d_pointnode, mem_size_pointnode));
+	
+	pvfmm::Profile::Toc();
+	
+	int threadsPerBlock = NUMTHREADS;
+	int blockCount = n/threadsPerBlock + (n%threadsPerBlock == 0 ? 0:1);
+		
+	std::cout << "n : " << n << std::endl;
+	std::cout << "blockCount : " << blockCount << std::endl;	
+		   
+    pvfmm::Profile::Tic("Evaluation", comm, false, 5);	
+    // copy data and compute polynomials at the same time
+    pvfmm::Profile::Tic("Copy + Polynomials", comm, false, 5);	
+    checkCudaErrors(cudaMemcpyAsync(d_coords, coords, mem_size_single,
+                               cudaMemcpyHostToDevice, streams[0]));
+	chebPoly_helper_stream(&d_coords[0], d_poly_x, d-1, n, blockCount, threadsPerBlock, streams[0]);
+    checkCudaErrors(cudaMemcpyAsync(&d_coords[n], &coords[n], mem_size_single,
+                               cudaMemcpyHostToDevice, streams[1]));
+	chebPoly_helper_stream(&d_coords[n], d_poly_y, d-1, n, blockCount, threadsPerBlock, streams[1]);
+	checkCudaErrors(cudaMemcpyAsync(&d_coords[2*n], &coords[2*n], mem_size_single,
+                               cudaMemcpyHostToDevice, streams[2]));
+	chebPoly_helper_stream(&d_coords[2*(n)], d_poly_z, d-1, n, blockCount, threadsPerBlock, streams[2]);  
+	
+	checkCudaErrors(cudaMemcpyAsync(d_pointnode, pointnode, mem_size_pointnode,
+                               cudaMemcpyHostToDevice, streams[3]));  
+    checkCudaErrors(cudaDeviceSynchronize());         
+	pvfmm::Profile::Toc();
+	
+	
+	// compute the evaluation
+	pvfmm::Profile::Tic("Vec_eval", comm, false, 5);
+	if (dof == 1)
+	vec_eval_kernel_helper_dof1_new_complete(n, d_poly_x, d_poly_y, d_poly_z, d_coeff, d_out, d_pointnode, blockCount, threadsPerBlock);
+	if (dof == 3)
+    vec_eval_kernel_helper_dof3_new_complete(n, d_poly_x, d_poly_y, d_poly_z, d_coeff, d_out, d_pointnode, blockCount, threadsPerBlock);	
+				
+	checkCudaErrors(cudaDeviceSynchronize());		
+	pvfmm::Profile::Toc();
+	pvfmm::Profile::Toc();
+	
+	
+	
+	// reorder the data if necessary
+	if (dof == 3) {
+		pvfmm::Profile::Tic("Reorder result", comm, false, 5);
+		reorderResult_helper(d_out, d_coords, n, dof, blockCount, threadsPerBlock);
+		pvfmm::Profile::Toc();
+	}
+	
+	
+	pvfmm::Profile::Tic("Copy data from GPU", comm, false, 5);
+	// copy back from GPU
+	if (dof == 1) {
+		checkCudaErrors(cudaMemcpy(tmp_out, d_out, mem_size_out,
+                              cudaMemcpyDeviceToHost));
+	} else if (dof == 3) {				  
+		checkCudaErrors(cudaMemcpy(tmp_out, d_coords, mem_size_out,
+                               cudaMemcpyDeviceToHost));
+    }
+    pvfmm::Profile::Toc();
+                
+    cudaHostUnregister(coords);
+    cudaHostUnregister(pointnode);            
+    for (int i = 0; i < 4; ++i)
+		cudaStreamDestroy(streams[i]);                   
+    // free GPU Memory
+   checkCudaErrors(cudaFree(d_out));
+   checkCudaErrors(cudaFree(d_coords));
+   checkCudaErrors(cudaFree(d_poly_x));
+   checkCudaErrors(cudaFree(d_poly_y));
+   checkCudaErrors(cudaFree(d_poly_z));
+   checkCudaErrors(cudaFree(d_pointnode));
+}
+
+template <class Real_t>
+void fast_interp_cuda_vec(const std::vector<Real_t>& reg_grid_vals, int data_dof,
                  int N_reg, const std::vector<Real_t>& query_points,
                  std::vector<Real_t>& query_values){
 
@@ -149,9 +292,10 @@ void fast_interp(const std::vector<Real_t>& reg_grid_vals, int data_dof,
 }
 
 template <class Real_t, class Tree_t>
-void EvalNodesLocal(std::vector<typename Tree_t::Node_t*>& nodes,
+void EvalNodesLocal_cuda_vec(std::vector<typename Tree_t::Node_t*>& nodes,
                     pvfmm::Vector<Real_t>& trg_coord,
-                    pvfmm::Vector<Real_t>& trg_value) { // Read nodes data
+                    pvfmm::Vector<Real_t>& trg_value,
+                    Real_t* d_coeff) { // Read nodes data
   size_t omp_p=omp_get_max_threads();
   tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
   size_t data_dof=nodes[0]->DataDOF();
@@ -178,6 +322,7 @@ void EvalNodesLocal(std::vector<typename Tree_t::Node_t*>& nodes,
   std::vector<size_t> part_indx(nodes.size()+1);
   part_indx[nodes.size()] = trg_mid.Dim();
 
+
 #pragma omp parallel for
   for (size_t j=0;j<nodes.size();j++) {
     part_indx[j]=std::lower_bound(&trg_mid[0],
@@ -185,208 +330,83 @@ void EvalNodesLocal(std::vector<typename Tree_t::Node_t*>& nodes,
                                   nodes[j]->GetMortonId()) - &trg_mid[0];
   }
 
-  // std::cout << "PART_INDX: " ;
-  // for (int i = 0; i < part_indx.size(); i++) {
-  //   std::cout << " " << part_indx[i];
-  // }
-  // std::cout << std::endl;
 
-  // std::cout << "PART_INDX_LB: " ;
-  // for (int i = 0; i < part_indx.size()-1; i++) {
-  //   std::cout << " " << part_indx[i+1] - part_indx[i];
-  // }
-  // std::cout << std::endl;
+std::vector<Real_t> coord; // vector for coordinates
+int numpoints = trg_mid.Dim();
+std::cout << "numpoints: " << numpoints << std::endl;
+coord.resize((numpoints)*COORD_DIM);
+std::vector<int> pointnode; // vector for node of a point
+pointnode.resize(numpoints);
+
+pvfmm::Profile::Tic("set coords", &sim_config->comm, false, 5);
 
 #pragma omp parallel for schedule(static)
   for (size_t pid=0;pid<omp_p;pid++) {
-    std::vector<Real_t> coord;
-    pvfmm::Vector<Real_t> tmp_out;    // buffer used in chebyshev evaluation
-
-    std::vector<Real_t> cx;
-    std::vector<Real_t> cy;
-    std::vector<Real_t> cz;
-    pvfmm::Matrix<Real_t> px;
-    pvfmm::Matrix<Real_t> py;
-    pvfmm::Matrix<Real_t> pz;
-
-    pvfmm::Vector<Real_t> coeff_;
-    { // Init coeff_
-      int d0=nodes[0]->ChebDeg()+1+8;
-      coeff_.ReInit(d0*d0*d0*data_dof);
-      coeff_.SetZero();
-    }
-
+   
     size_t pt_start0=((pid+0)*trg_mid.Dim())/omp_p;
     size_t pt_end0=((pid+1)*trg_mid.Dim())/omp_p;
     long node_start=std::lower_bound(&part_indx[0], &part_indx[0]+part_indx.size(), pt_start0)-&part_indx[0]-1;
     long node_end=std::lower_bound(&part_indx[0], &part_indx[0]+part_indx.size(), pt_end0)-&part_indx[0];
     node_start=std::max<long>(0,std::min<long>(node_start, nodes.size()));
     node_end=std::max<long>(0,std::min<long>(node_end, nodes.size()));
-    for (size_t j=node_start;j<node_end;j++) {
+    for (size_t j=node_start;j<node_end;j++) {   // for each node
       size_t pt_start_=std::max<long>(pt_start0, part_indx[j]);
       size_t pt_end_=std::min<long>(pt_end0, part_indx[j+1]);
       if(pt_start_>=pt_end_) continue;
 
-      { // set coeff_
-        pvfmm::Vector<Real_t>& coeff=nodes[j]->ChebData();
-        int cheb_deg=nodes[j]->ChebDeg();
-        int d=cheb_deg+1;
-        int d0;
-        for(d0=d;d0%4;d0++);
-
-        assert(coeff.Dim()==(size_t)(d*(d+1)*(d+2)*data_dof)/6);
-        long indx=0;
-        for(int l0=0;l0<data_dof;l0++){
-          for(int i=0;i<d;i++){
-            for(int j=0;i+j<d;j++){
-              for(int k=0;i+j+k<d;k++){
-                coeff_[k+d0*(j+d0*(i+d0*l0))]=coeff[indx];
-                indx++;
-              }
-            }
-          }
-        }
-        
-        /////////////////////////////////
-      //std::cout << "node_number: " << j << std::endl;
-      //std::cout << "first few coeffs: " << std::endl;
-     // for (int i = 0; i < 10; i++) {
-	//	  std::cout << coeff[i] << std::endl;
-	 // }
-      ///////////////////////////////////
-
-        
-        
-        
-      }
-      
-      
       const size_t blk_size=288;
+      
       for(size_t pt_start=pt_start_;pt_start<pt_end_;pt_start+=blk_size){
         size_t pt_end=std::min(pt_end_, pt_start+blk_size);
         const size_t n_pts=pt_end-pt_start;
-
+        
         Real_t* coord_ptr = &trg_coord[0]+pt_start*COORD_DIM;
+        
         {
+					
           //////////////////////////////////////////////////////////////
-          // CHEBYSHEV INTERPOLATION
+          // SCALE COORDINATES
           //////////////////////////////////////////////////////////////
-          coord.resize((n_pts+16)*COORD_DIM);
+
           { // Set coord
             Real_t* c = nodes[j]->Coord();
             size_t  d = nodes[j]->Depth();
             Real_t  s = (Real_t)(1ULL<<d);
+            
             for (size_t i=0;i<n_pts;i++) {
               // scale to [-1,1] -> used in cheb_eval
-              coord[i*COORD_DIM+0]=(coord_ptr[i*COORD_DIM+0]-c[0])*2.0*s-1.0;
-              coord[i*COORD_DIM+1]=(coord_ptr[i*COORD_DIM+1]-c[1])*2.0*s-1.0;
-              coord[i*COORD_DIM+2]=(coord_ptr[i*COORD_DIM+2]-c[2])*2.0*s-1.0;
+              coord[pt_start + i]=(coord_ptr[i*COORD_DIM+0]-c[0])*2.0*s-1.0;
+              coord[pt_start + i+(numpoints)]=(coord_ptr[i*COORD_DIM+1]-c[1])*2.0*s-1.0;
+              coord[pt_start + i+2*(numpoints)]=(coord_ptr[i*COORD_DIM+2]-c[2])*2.0*s-1.0;
+                   
+              pointnode[pt_start + i] = j; // store the node the point lies in
             }
+            
           }
-          for (size_t i=n_pts;i<n_pts+16;i++) {
-            // scale to [-1,1] -> used in cheb_eval
-            coord[i*COORD_DIM+0]=0.0;
-            coord[i*COORD_DIM+1]=0.0;
-            coord[i*COORD_DIM+2]=0.0;
-          }
-
-          if(coord.size()){
-            int cheb_deg=nodes[j]->ChebDeg();
-            int d=cheb_deg+1;
-            int d0;
-            for(d0=d;d0%4;d0++);
-            int n=n_pts;
-            for(;n%16;n++);
-
-            cx.resize(n);
-            cy.resize(n);
-            cz.resize(n);
-            for(long i=0;i<n;i++){
-              cx[i]=coord[i*COORD_DIM+0];
-              cy[i]=coord[i*COORD_DIM+1];
-              cz[i]=coord[i*COORD_DIM+2];
-            }
-
-			////////////////////////////////////////////////////////////
-			//std::cout << "x coords: " << cx[0] << std::endl;
-			//std::cout << "y coords: " << cy[0] << std::endl;
-			//std::cout << "z coords: " << cz[0] << std::endl;
-            ////////////////////////////////////////////////////////////
-
-			//pvfmm::Profile::Tic("Compute polynomials", &sim_config->comm, false, 5);
-            px.Resize(d0,n); px.SetZero();
-            py.Resize(d0,n); py.SetZero();
-            pz.Resize(d0,n); pz.SetZero();
-            pvfmm::cheb_poly(cheb_deg,&(cx[0]),n,&(px[0][0]));
-            pvfmm::cheb_poly(cheb_deg,&(cy[0]),n,&(py[0][0]));
-            pvfmm::cheb_poly(cheb_deg,&(cz[0]),n,&(pz[0][0]));
-			//pvfmm::Profile::Toc();
-			
-			////////////////////////////////////////////////////////////
-			
-			//std::cout << "x poly: " << px[0][0] << " " << px[1][0] << " " << px[2][0] << " " << std::endl;
-			//std::cout << "y poly: " << py[0][0] << " " << py[1][0] << " " << py[2][0] << " " << std::endl;
-			//std::cout << "z poly: " << pz[0][0] << " " << pz[1][0] << " " << pz[2][0] << " " << std::endl;
-			
-			
-			////////////////////////////////////////////////////////////
-			
-
-            if (tmp_out.Dim()<n*data_dof) {
-              tmp_out.Resize(n*data_dof);
-            }
-                           
-			//pvfmm::Profile::Tic("Vec eval", &sim_config->comm, false, 5);
-            if(pvfmm::mem::TypeTraits<Real_t>::ID()==pvfmm::mem::TypeTraits<float>::ID()){
-              typedef float Real;
-              #if defined __MIC__
-                #define Vec_t Real_t
-              #elif defined __AVX__
-                #define Vec_t __m256
-              #elif defined __SSE3__
-                #define Vec_t __m128
-              #else
-                #define Vec_t Real
-              #endif
-              ::pvfmm::vec_eval<Real, Vec_t>(n,d0,d,data_dof, (Real*)&px[0][0], (Real*)&py[0][0], (Real*)&pz[0][0], (Real*)&coeff_[0], (Real*)&tmp_out[0]);
-              #undef Vec_t
-            }else if(pvfmm::mem::TypeTraits<Real_t>::ID()==pvfmm::mem::TypeTraits<double>::ID()){
-              typedef double Real;
-              #if defined __MIC__
-                #define Vec_t Real_t
-              #elif defined __AVX__
-                #define Vec_t __m256d
-              #elif defined __SSE3__
-                #define Vec_t __m128d
-              #else
-                #define Vec_t Real
-              #endif
-              ::pvfmm::vec_eval<Real, Vec_t>(n,d0,d,data_dof, (Real*)&px[0][0], (Real*)&py[0][0], (Real*)&pz[0][0], (Real*)&coeff_[0], (Real*)&tmp_out[0]);
-              #undef Vec_t
-            }else{
-              typedef Real_t Real;
-              #define Vec_t Real
-              ::pvfmm::vec_eval<Real, Vec_t>(n,d0,d,data_dof, (Real*)&px[0][0], (Real*)&py[0][0], (Real*)&pz[0][0], (Real*)&coeff_[0], (Real*)&tmp_out[0]);
-              #undef Vec_t
-            }
-            //pvfmm::Profile::Toc(); 
           
-          
-            //pvfmm::Profile::Tic("Copy to trg_value", &sim_config->comm, false, 5);
-            { // Copy to trg_value
-              Real_t *trg_value_ = &trg_value[0] + pt_start * data_dof;
-              for (long i = 0; i < n_pts; i++) {
-                for (int j = 0; j < data_dof; j++) {
-                  trg_value_[i * data_dof + j] = tmp_out[j * n + i];
-                }
-              }
-            }
-            //pvfmm::Profile::Toc();
-          }
         }
       }
     }
   }
+  pvfmm::Profile::Toc();
+  
+ // if there are points to evaluate
+  if(numpoints > 0){		
+	  
+	  	
+            int cheb_deg=nodes[0]->ChebDeg();
+            int d=cheb_deg+1;
+            int n=numpoints;
+           
+            
+            Real_t *trg_value_ = &trg_value[0];
+            
+            // execute evaluation          
+            vec_eval_cuda(n, d, data_dof, &coord[0], d_coeff, trg_value_, &pointnode[0]);
+            			
+          }
+
+  
   { // Add FLOP
     long d=nodes[0]->ChebDeg()+1;
     pvfmm::Profile::Add_FLOP(trg_coord.Dim()/COORD_DIM * ( COORD_DIM*d*3 + ((d*(d+1)*(d+2))/6) * data_dof * 2 ) );
@@ -394,11 +414,12 @@ void EvalNodesLocal(std::vector<typename Tree_t::Node_t*>& nodes,
 }
 
 template <class Tree_t>
-void EvalTree(Tree_t* tree,
+void EvalTree_cuda_vec(Tree_t* tree,
               typename Tree_t::Real_t* trg_coord_,
               size_t N,
               typename Tree_t::Real_t* value,
-              pvfmm::BoundaryType bc_type) {
+              pvfmm::BoundaryType bc_type,
+              typename Tree_t::Real_t* d_coeff) {
   size_t omp_p=omp_get_max_threads();
   typedef typename Tree_t::Node_t Node_t;
   typedef typename Tree_t::Real_t Real_t;
@@ -554,7 +575,7 @@ void EvalTree(Tree_t* tree,
   static pvfmm::Vector<Real_t> trg_value_outsider;
   pvfmm::Profile::Tic("OutEvaluation", &sim_config->comm, false, 5);
   trg_value_outsider.Resize(trg_cnt_others*data_dof);
-  EvalNodesLocal<Real_t, Tree_t>(nodes, trg_coord_outside, trg_value_outsider);
+  EvalNodesLocal_cuda_vec<Real_t, Tree_t>(nodes, trg_coord_outside, trg_value_outsider, d_coeff);
   pvfmm::Profile::Toc();
 
   //////////////////////////////////////////////////
@@ -639,7 +660,7 @@ void EvalTree(Tree_t* tree,
   static pvfmm::Vector<Real_t> trg_value_insider;
   pvfmm::Profile::Tic("InEvaluation", &sim_config->comm, false, 5);
   trg_value_insider.Resize(trg_cnt_inside*data_dof);
-  EvalNodesLocal<Real_t, Tree_t>(nodes, trg_coord_inside, trg_value_insider);
+  EvalNodesLocal_cuda_vec<Real_t, Tree_t>(nodes, trg_coord_inside, trg_value_insider, d_coeff);
   pvfmm::Profile::Toc();
 
   //////////////////////////////////////////////////
@@ -756,14 +777,16 @@ void EvalTree(Tree_t* tree,
 
 template<typename real_t,
          class NodeType>
-class NodeFieldFunctor {
+class NodeFieldFunctor_cuda_vec {
 
  public:
-  explicit NodeFieldFunctor(NodeType* node):
+  explicit NodeFieldFunctor_cuda_vec(NodeType* node):
       node_(node) {
+		  
+		  setCoeffs();
   }
 
-  virtual ~NodeFieldFunctor() {
+  virtual ~NodeFieldFunctor_cuda_vec() {
   }
 
   void operator () (const real_t* points_pos,
@@ -771,7 +794,7 @@ class NodeFieldFunctor {
                     real_t* out) {
     tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
     pvfmm::Profile::Tic("EvalTree", &sim_config->comm, true, 5);
-    EvalTree(node_, const_cast<real_t*>(points_pos), num_points, out,sim_config->bc);
+    EvalTree_cuda_vec(node_, const_cast<real_t*>(points_pos), num_points, out,sim_config->bc, d_coeff);
     pvfmm::Profile::Toc();
   }
 
@@ -783,6 +806,75 @@ class NodeFieldFunctor {
   }
  private:
   NodeType* node_;
+  real_t* d_coeff;
+  
+  void setCoeffs() {	  
+	tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();  
+	
+	pvfmm::Profile::Tic("Initialization function", &sim_config->comm, false, 5);	  
+	//Init GPU
+	pvfmm::Profile::Tic("Initialize GPU", &sim_config->comm, false, 5);	
+	// Get CUDA device
+	int devID;
+	// This will pick the best possible CUDA capable device
+	devID = findCudaDevice(0, (const char **)"");	
+	
+	cudaFree(0); // force decive initialization                  		                        	  	 		                        	
+	pvfmm::Profile::Toc();
+	
+	pvfmm::Profile::Tic("Get leaf nodes", &sim_config->comm, false, 5);
+	typedef typename NodeType::Node_t Node_t;
+  typedef typename NodeType::Real_t Real_t;
+	std::vector<Node_t*> nodes;
+   // Get list of leaf nodes.
+    const std::vector<Node_t*>& all_nodes=node_->GetNodeList();
+    for (size_t i=0; i< all_nodes.size(); i++) {
+      if (all_nodes[i]->IsLeaf() && !all_nodes[i]->IsGhost()) {
+        nodes.push_back(all_nodes[i]);
+      }
+    }
+    assert(nodes.size());
+	pvfmm::Profile::Toc();
+
+	std::cout << "node count: " << nodes.size() << std::endl;
+	
+	pvfmm::Profile::Tic("Collect Coeffs", &sim_config->comm, false, 5);
+	size_t dof=nodes[0]->DataDOF();
+	int d = nodes[0]->ChebDeg()+1;
+	// create large buffer
+	int numcoeffs = nodes.size() * (d * (d+1) *(d+2) * dof / 6);
+	int numcoeffs_single = (d * (d+1) *(d+2) * dof / 6);
+	std::vector<Real_t> coeff_all;
+	coeff_all.reserve(numcoeffs);
+	for (int i = 0; i < nodes.size(); i++) {
+		pvfmm::Vector<Real_t>& coeff=nodes[i]->ChebData();
+		for (int j = 0; j < numcoeffs_single; j++) {
+			
+			coeff_all.push_back(coeff[j]);
+			
+		}
+	}
+	pvfmm::Profile::Toc();
+	
+	std::cout << "coeff_all size: " << coeff_all.size() << std::endl;
+	
+	// Coeffs to GPU (1 node)
+	pvfmm::Profile::Tic("Malloc Memory", &sim_config->comm, false, 5);
+
+	
+	unsigned int mem_size_coeff = sizeof(Real_t) * numcoeffs;
+	checkCudaErrors(cudaMalloc((void**) &d_coeff, mem_size_coeff)); 
+	pvfmm::Profile::Toc();
+	
+	pvfmm::Profile::Tic("Copy coeffs", &sim_config->comm, false, 5);
+	checkCudaErrors(cudaMemcpy(d_coeff, &coeff_all[0], mem_size_coeff,
+                               cudaMemcpyHostToDevice));
+    cudaDeviceSynchronize();
+    pvfmm::Profile::Toc();
+    
+    pvfmm::Profile::Toc();
+  }
+  
 };
 
 }      // namespace tbslas

@@ -11,10 +11,7 @@
 // *************************************************************************
 
 
-// Modified to use cuda
-
-
-
+// edited 2016 by Benedikt Kucis for CUDA support
 
 #ifndef SRC_TREE_NODE_FIELD_FUNCTOR_H_CUDA_
 #define SRC_TREE_NODE_FIELD_FUNCTOR_H_CUDA_

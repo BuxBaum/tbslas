@@ -1,3 +1,10 @@
+/*
+ * Contains test function and examples
+ * 
+ * Important tests are 6,7,8
+ * 
+ */
+
 #include <mpi.h>
 #include <omp.h>
 #include <stdio.h>
@@ -24,6 +31,7 @@
 #include <tree/tree_semilag.h>
 #include <tree/tree_utils.h>
 #include <tree/node_field_functor_cuda.h>
+#include <tree/tree_functor_cuda_vec.h>
 
 #include <tree.hpp>
 
@@ -35,6 +43,9 @@
 
 #include "chebEval.h"
 #include "runge-kutta.h"
+#include "cusparse.h"
+
+#include <field_wrappers.h>
 
 #include <cstdio>
 
@@ -53,14 +64,17 @@ typedef typename Tree_t_f::Node_t NodeType_f;
 char* fname = (char*) "velocityTree";
 
 void (*fn_vel)(const double* , int , double*)=NULL;
+void (*fn_vel2)(const double* , int , double*)=NULL;
 void (*fn_vel_f)(const float* , int , float*)=NULL;	
 void (*fn_val)(const double* , int , double*)=NULL;
 
 // compute Chebyshev polynomials on GPU
+// compare to CPU version
 // d : cheb degree, in: input coords, n : coord count
 template <class Real_t>
 void chebPoly(int d, Real_t* in, int n) 
 {
+	d++;
 	
 	tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
 	MPI_Comm* comm = &sim_config->comm;
@@ -209,157 +223,9 @@ void chebPoly(int d, Real_t* in, int n)
 	cudaDeviceReset();
 }
 
-// chebyshev polynomials using shared memory
-template <class Real_t>
-void chebPoly_shared(int d, Real_t* in, int n) 
-{
-	
-	tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
-	MPI_Comm* comm = &sim_config->comm;
-		
-	// Get CUDA device
-	int devID;
-   	cudaDeviceProp props;
-
-   	// This will pick the best possible CUDA capable device
-   	devID = findCudaDevice(0, (const char **)"");
-
-   	//Get GPU information
-   	checkCudaErrors(cudaGetDevice(&devID));
-	checkCudaErrors(cudaGetDeviceProperties(&props, devID));
-    printf("Device %d: \"%s\" with Compute %d.%d capability\n",
-		devID, props.name, props.major, props.minor);
-		
-	// split in to x,y,z arrays
-	Real_t* x_in = new Real_t[n];
-	Real_t* y_in = new Real_t[n];
-	Real_t* z_in = new Real_t[n];
-	Real_t* x_out = new Real_t[n*(d+1)];
-	Real_t* y_out = new Real_t[n*(d+1)];
-	Real_t* z_out = new Real_t[n*(d+1)];
-	
-	for (int i = 0; i < n; i++)
-	{
-		x_in[i] = in[i*COORD_DIM+0];
-		y_in[i] = in[i*COORD_DIM+1];
-		z_in[i] = in[i*COORD_DIM+2];
-	}
-	
-	pvfmm::Profile::Tic("Chebyshev Polynomials on GPU", comm, true, 5);
-	pvfmm::Profile::Tic("Initialization", comm, true, 5);
-	
-	// allocate GPU memory
-	Real_t* d_x_in = NULL;
-	Real_t* d_y_in = NULL;
-	Real_t* d_z_in = NULL;
-	Real_t* d_x_out = NULL;
-	Real_t* d_y_out = NULL;
-	Real_t* d_z_out = NULL;
-	
-	unsigned int mem_size_in = sizeof(Real_t) * n;
-	unsigned int mem_size_out = sizeof(Real_t) * n * (d+1);
-	
-	checkCudaErrors(cudaMalloc((void**) &d_x_in, mem_size_in)); 
-	checkCudaErrors(cudaMalloc((void**) &d_y_in, mem_size_in)); 
-	checkCudaErrors(cudaMalloc((void**) &d_z_in, mem_size_in)); 
-	checkCudaErrors(cudaMalloc((void**) &d_x_out, mem_size_out)); 
-	checkCudaErrors(cudaMalloc((void**) &d_y_out, mem_size_out));
-	checkCudaErrors(cudaMalloc((void**) &d_z_out, mem_size_out));
-	
-	// needed block count
-	// n threads in total per direction, for now just blocks with max thread number
-	int threadsPerBlock = 1024;
-	int blockCount = n/threadsPerBlock + (n%threadsPerBlock == 0 ? 0:1);
-	
-	pvfmm::Profile::Toc();
-	pvfmm::Profile::Tic("Copy to GPU", comm, true, 5);
-	
-	// Copy data to GPU
-	checkCudaErrors(cudaMemcpy(d_x_in, x_in, mem_size_in,
-                               cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_y_in, y_in, mem_size_in,
-                               cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_z_in, z_in, mem_size_in,
-                               cudaMemcpyHostToDevice));
-                               
-    pvfmm::Profile::Toc();
-    pvfmm::Profile::Tic("Calculate polynomials", comm, true, 5);
-                               
-    // Calculate chebPoly for x,y,z
-    pvfmm::Profile::Tic("X", comm, true, 5);
-    chebPoly_helper_shared(d_x_in, d_x_out, d, n, blockCount, threadsPerBlock);
-    pvfmm::Profile::Toc();
-    pvfmm::Profile::Tic("Y", comm, true, 5);
-    chebPoly_helper_shared(d_y_in, d_y_out, d, n, blockCount, threadsPerBlock);
-    pvfmm::Profile::Toc();
-    pvfmm::Profile::Tic("Z", comm, true, 5);
-    chebPoly_helper_shared(d_z_in, d_z_out, d, n, blockCount, threadsPerBlock);
-    pvfmm::Profile::Toc();
-    pvfmm::Profile::Toc();
-    
-    pvfmm::Profile::Tic("Copy to CPU", comm, true, 5);
-    // Copy data back to CPU
-    checkCudaErrors(cudaMemcpy(x_out, d_x_out, mem_size_out,
-                               cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(y_out, d_y_out, mem_size_out,
-                               cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(z_out, d_z_out, mem_size_out,
-                               cudaMemcpyDeviceToHost));
-    pvfmm::Profile::Toc();
-    pvfmm::Profile::Toc();
-                                 
-     // Run on CPU for comparison
-    Real_t* x_out_cpu = new Real_t[n*(d+1)];
-	Real_t* y_out_cpu = new Real_t[n*(d+1)];
-	Real_t* z_out_cpu = new Real_t[n*(d+1)];
-	
-	pvfmm::Profile::Tic("Chebyshev Polynomials on CPU", comm, true, 5);
-	
-	pvfmm::cheb_poly(d,&(x_in[0]),n,&(x_out_cpu[0]));
-	pvfmm::cheb_poly(d,&(y_in[0]),n,&(y_out_cpu[0]));
-	pvfmm::cheb_poly(d,&(z_in[0]),n,&(z_out_cpu[0]));
-	
-	pvfmm::Profile::Toc();
-	
-	// compare Values
-	bool passed = true;
-	Real_t tolerance = 1e-6f;
-    for (int i = 0; i < n*(d+1); i++)
-    {
-		if (std::abs(x_out[i] - x_out_cpu[i]) > tolerance ||
-		    std::abs(y_out[i] - y_out_cpu[i]) > tolerance ||
-			std::abs(z_out[i] - z_out_cpu[i]) > tolerance) {	
-			std::cout << "x_out: " << x_out[i] << "x_out_cpu: " << x_out_cpu[i] << std::endl;	
-			std::cout << "y_out: " << y_out[i] << "y_out_cpu: " << y_out_cpu[i] << std::endl;	
-			std::cout << "z_out: " << z_out[i] << "z_out_cpu: " << z_out_cpu[i] << std::endl;	
-			passed = false;
-			std::cout << "Fail at i: " << i << std::endl;
-			break;
-		}
-	}     
-	if (passed == true)
-	std::cout << "chebPoly passed tolerance" << std::endl;                      
-                               
-    // clean up
-    delete [] x_in;
-    delete [] y_in;
-    delete [] z_in;
-    delete [] x_out;
-    delete [] y_out;
-    delete [] z_out;
-    delete [] x_out_cpu;
-    delete [] y_out_cpu;
-    delete [] z_out_cpu;
-    checkCudaErrors(cudaFree(d_x_in));
-    checkCudaErrors(cudaFree(d_y_in));
-    checkCudaErrors(cudaFree(d_z_in));
-	checkCudaErrors(cudaFree(d_x_out));
-    checkCudaErrors(cudaFree(d_y_out));
-    checkCudaErrors(cudaFree(d_z_out));
-	cudaDeviceReset();
-}
-
 // tests for matrix multiplication
+// used to find out how to use cuBLAS in the best way
+// not relevant for vector evaluation
 /**
  * Results:
  * CPU GEMM, Cublas GEMM Switched, pvfmm Cublas Gemm: correct results but stored like a b c a b c ...
@@ -591,26 +457,35 @@ void matrixMulTests()
 	cudaDeviceReset();
 }
 
-
-// compare multiplication of large matrices like in "apply Mp3" for timing
-void matrixMul_Manypoints(int numPoints, int d)
+// simulate first multiplikation
+// comparing CPU, cuBLAS, cuSPARSE
+void matrixMul_Manypoints_mul1(int numPoints, int d)
 {
 	tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
 	MPI_Comm* comm = &sim_config->comm;
 	
+	d=d+1;
+	
 	int dof = 3;
 	// vectors for multipikation
-	std::vector<double> matr (numPoints*numPoints*dof*d);
+	std::vector<double> coeff (d*d*d*dof);
 	std::vector<double> poly (numPoints * d);
-	std::vector<double> resCPU (numPoints*numPoints*numPoints*dof);
-	std::vector<double> resGPU (numPoints*numPoints*numPoints*dof);
-	int sizeMatr = numPoints*numPoints*dof*d;
+	std::vector<double> resCPU (numPoints*d*d*dof);
+	std::vector<double> resGPU (numPoints*d*d*dof);
+	int sizeCoeff = d*d*d*dof;
 	int sizePoly = numPoints*d;
-	int sizeRes = numPoints*numPoints*numPoints*dof;
-	for (int i = 0; i < sizeMatr; i++)
+	int sizeRes = numPoints*d*d*dof;
+	for (int i = 0; i < sizeCoeff; i++)
 		{
-			matr[i] = (double) i;
+			//coeff[i] = (double) i;
+			//if (i%2==0 || i%3 == 0 || i > 15)
+			//	coeff[i] = 0.0;
+			
+			coeff[i] = 0.0;
+			if (i%10==0)
+				coeff[i] = (double) i;
 		}
+		
 	for (int i = 0; i < sizePoly; i++)
 		{
 			poly[i] = (double) i;
@@ -634,30 +509,31 @@ void matrixMul_Manypoints(int numPoints, int d)
 	pvfmm::Profile::Tic("Allocate buffers", comm, true, 5);
 	// Allocate Buffers
 	int mem_size_poly = sizeof(double) * sizePoly;
-	int mem_size_matr = sizeof(double) * sizeMatr;
+	int mem_size_coeff = sizeof(double) * sizeCoeff;
 	int mem_size_res = sizeof(double) * sizeRes;
 	
 	double* d_poly = NULL;
-	double* d_matr = NULL;
+	double* d_coeff = NULL;
 	double* d_res = NULL;
 	
 	checkCudaErrors(cudaMalloc((void**) &d_poly, mem_size_poly));
-	checkCudaErrors(cudaMalloc((void**) &d_matr, mem_size_matr));
+	checkCudaErrors(cudaMalloc((void**) &d_coeff, mem_size_coeff));
 	checkCudaErrors(cudaMalloc((void**) &d_res, mem_size_res));
 	pvfmm::Profile::Toc();
 	pvfmm::Profile::Tic("Copy data to GPU", comm, true, 5);
 	// Copy data to GPU
 	checkCudaErrors(cudaMemcpy(d_poly, &poly[0], mem_size_poly,
                                cudaMemcpyHostToDevice));
-	checkCudaErrors(cudaMemcpy(d_matr, &matr[0], mem_size_matr,
+	checkCudaErrors(cudaMemcpy(d_coeff, &coeff[0], mem_size_coeff,
                                cudaMemcpyHostToDevice));    
 	pvfmm::Profile::Toc();
 	
 	// Init Cublas
 	cublasHandle_t handle;
     cublasCreate(&handle); 
+    cublasStatus_t status;
                          
-	int M = numPoints*numPoints*dof;
+	int M = d*d*dof;
 	int N = numPoints;
 	int K = d;
 	double alpha = 1.0;
@@ -666,36 +542,190 @@ void matrixMul_Manypoints(int numPoints, int d)
 	int ldb = N;
 	int ldc = M;
 	
-	pvfmm::Profile::Tic("Multiplication", comm, true, 5);
+	pvfmm::Profile::Tic("Multiplication cuBLAS", comm, true, 5);
 	// Multipication
 	checkCudaErrors(cudaDeviceSynchronize());
-	cublasStatus_t status = cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, d_matr, lda, d_poly, ldb, &beta, d_res, ldc);
+	status = cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, d_coeff, lda, d_poly, ldb, &beta, d_res, ldc);
 	checkCudaErrors(cudaDeviceSynchronize());
 	pvfmm::Profile::Toc();
 	
 	pvfmm::Profile::Tic("Copy data from GPU", comm, true, 5);
 	// Copy data back to CPU
 	checkCudaErrors(cudaMemcpy(&resGPU[0], d_res, mem_size_res,
-                               cudaMemcpyDeviceToHost)); 
+                              cudaMemcpyDeviceToHost)); 
     pvfmm::Profile::Toc();                           
-    cublasDestroy(handle);
     
-    
+ 
     pvfmm::Profile::Toc();
     
+    // cuSPARSE
+    cusparseStatus_t sparsestatus;
+	cusparseHandle_t sparsehandle;
+	sparsestatus = cusparseCreate(&sparsehandle);
+	if (sparsestatus != CUSPARSE_STATUS_SUCCESS)
+		std::cout << "cusparse init failed" << std::endl;
+			
+	cusparseMatDescr_t descrA = 0;
+	sparsestatus = cusparseCreateMatDescr(&descrA);
+	if (sparsestatus != CUSPARSE_STATUS_SUCCESS)
+		std::cout << "cusparse MatDescr failed" << std::endl;
+	cusparseSetMatType(descrA,CUSPARSE_MATRIX_TYPE_GENERAL);
+	cusparseSetMatIndexBase(descrA,CUSPARSE_INDEX_BASE_ZERO);
+    
+	pvfmm::Profile::Tic("cuSPARSE", comm, false, 5);	
+    
+	pvfmm::Profile::Tic("nnz", comm, false, 5);	
+    
+			// apparently uses column major
+    
+			M = d;          // rows
+			N = d*d*dof; // columns
+			lda = M;
+				
+			int* nnzPerC = new int[N];
+			int nnzTotal;
+			
+			int mem_size_nnz = sizeof(int) * N;
+			
+			int* d_nnz = NULL;
+			
+			checkCudaErrors(cudaMalloc((void**) &d_nnz, mem_size_nnz));
+				
+			// for csr	
+			
+			sparsestatus = cusparseDnnz(sparsehandle, CUSPARSE_DIRECTION_COLUMN, M, 
+             N, descrA, 
+             d_coeff, 
+             lda, d_nnz, &nnzTotal);
+             
+			if (sparsestatus != CUSPARSE_STATUS_SUCCESS)
+				std::cout << "cusparse nnz failed" << std::endl;
+
+			checkCudaErrors(cudaDeviceSynchronize());
+			pvfmm::Profile::Toc();
+			
+			pvfmm::Profile::Tic("dense to csr", comm, false, 5);	
+				
+			// convert dense to csr matrix
+			int mem_size_val = sizeof(double) * nnzTotal;
+			int mem_size_colPtr = sizeof(int) * N+1;//M+1;	
+			int mem_size_rowInd = sizeof(int) * nnzTotal;				
+			double* d_valA = NULL;	
+			int* d_csrColPtrA = NULL;
+			int* d_csrRowIndA = NULL;
+			
+			checkCudaErrors(cudaMalloc((void**) &d_valA, mem_size_val));					
+			checkCudaErrors(cudaMalloc((void**) &d_csrRowIndA, mem_size_rowInd));
+			checkCudaErrors(cudaMalloc((void**) &d_csrColPtrA, mem_size_colPtr));					
+					
+           sparsestatus = cusparseDdense2csc(sparsehandle, M, N, 
+                descrA, 
+                d_coeff, 
+                lda, d_nnz, 
+                d_valA, 
+                d_csrRowIndA, d_csrColPtrA);
+                
+            if (sparsestatus != CUSPARSE_STATUS_SUCCESS)
+				std::cout << "cusparse dense2csc failed" << std::endl;
+            
+            checkCudaErrors(cudaDeviceSynchronize());
+            pvfmm::Profile::Toc();			
+										
+			pvfmm::Profile::Tic("poly transpose", comm, true, 5);
+			// transpose poly
+			double* d_polytrans = NULL;
+			checkCudaErrors(cudaMalloc((void**) &d_polytrans, mem_size_poly));
+			M = d; // number of rows
+			N = numPoints; // number of columns
+			lda = N;
+			ldb = M;
+			status = cublasDgeam(handle,
+								  CUBLAS_OP_T, CUBLAS_OP_N,
+								  M, N,
+								  &alpha,
+								  d_poly, lda,
+								  &beta,
+								  d_polytrans, ldb,
+								  d_polytrans, ldb);
+								  
+			checkCudaErrors(cudaDeviceSynchronize());					  
+			pvfmm::Profile::Toc();			
+												
+			pvfmm::Profile::Tic("mul", comm, false, 5);	
+			
+			M = d*d*dof;   // rows A
+			N = numPoints; // columns B
+			K = d;
+			lda = M;
+			ldb = K;
+			ldc = M;
+			
+			sparsestatus = cusparseDcsrmm(sparsehandle, 
+			CUSPARSE_OPERATION_NON_TRANSPOSE, 
+			M, 
+			N, 
+			K, 
+			nnzTotal, 
+			&alpha, 
+			descrA, 
+			d_valA, 
+			d_csrColPtrA, 
+			d_csrRowIndA,
+			d_polytrans, 
+			ldb,
+			&beta,
+			d_res, 
+			ldc);
+
+			if (sparsestatus != CUSPARSE_STATUS_SUCCESS)
+				std::cout << "cusparse dcsrmm failed" << std::endl;
+
+			checkCudaErrors(cudaDeviceSynchronize());
+			pvfmm::Profile::Toc();
+			pvfmm::Profile::Toc();
+							
+			double* outtest = new double[ldc*numPoints];
+			int mem_size_outtest = sizeof(double) * ldc * numPoints;
+			checkCudaErrors(cudaMemcpy(outtest, d_res, mem_size_outtest,
+                               cudaMemcpyDeviceToHost));		
+					
+			pvfmm::Profile::Tic("cuSPARSE transpose included", comm, false, 5);	
+			sparsestatus = cusparseDcsrmm2(sparsehandle, 
+			CUSPARSE_OPERATION_NON_TRANSPOSE,
+			CUSPARSE_OPERATION_TRANSPOSE, 
+			M, 
+			N, 
+			K, 
+			nnzTotal, 
+			&alpha, 
+			descrA, 
+			d_valA, 
+			d_csrColPtrA, 
+			d_csrRowIndA,
+			d_poly, 
+			N,
+			&beta,
+			d_res, 
+			ldc);
+
+			if (sparsestatus != CUSPARSE_STATUS_SUCCESS)
+				std::cout << "cusparse dcsrmm failed" << std::endl;
+			checkCudaErrors(cudaDeviceSynchronize());
+			pvfmm::Profile::Toc();		
+								  
     pvfmm::Profile::Tic("Multiplication on CPU", comm, true, 5);
     // CPU Multiplication
     {   
 			std::vector<double> tmpRes (sizeRes);
 			
-			pvfmm::Matrix<double> Mi  (numPoints*numPoints*dof, d,&matr[0],false);
+			pvfmm::Matrix<double> Mi  (d*d*dof, d,&coeff[0],false);
 			pvfmm::Matrix<double> Mp  (d, numPoints,&poly[0],false);
-			pvfmm::Matrix<double> Mo  (numPoints*numPoints*dof,numPoints,&tmpRes[0],false);
+			pvfmm::Matrix<double> Mo  (d*d*dof,numPoints,&tmpRes[0],false);
 			pvfmm::Profile::Tic("Multiplication", comm, true, 5);
 			pvfmm::Matrix<double>::GEMM(Mo, Mi, Mp);         
 			pvfmm::Profile::Toc();
 			pvfmm::Profile::Tic("Transpose", comm, true, 5);
-			pvfmm::Matrix<double> Mo_t(numPoints,numPoints*numPoints*dof,&resCPU[0],false);
+			pvfmm::Matrix<double> Mo_t(numPoints,d*d*dof,&resCPU[0],false);
 			for(size_t i=0;i<Mo.Dim(0);i++)
 			for(size_t j=0;j<Mo.Dim(1);j++){
 			  Mo_t[j][i]=Mo[i][j];
@@ -720,17 +750,35 @@ void matrixMul_Manypoints(int numPoints, int d)
 	if (passed == true)
 	std::cout << "Multiplication passed tolerance" << std::endl;
 	
+	passed = true;
+	for (int i = 0; i < sizeRes; i++)
+    {
+		if (std::abs(resCPU[i] - outtest[i]) > tolerance) {	
+			std::cout << "resCPU: " << resCPU[i] << "cuSPARSE: " << outtest[i] << std::endl;	
+			passed = false;
+			std::cout << "Fail at i: " << i << std::endl;
+			break;
+		}
+	}     
+	if (passed == true)
+	std::cout << "cuSPARSE passed tolerance" << std::endl;
+	
 	// cleanup
+	cublasDestroy(handle);
 	checkCudaErrors(cudaFree(d_poly));
-    checkCudaErrors(cudaFree(d_matr));
+	checkCudaErrors(cudaFree(d_polytrans));
+    checkCudaErrors(cudaFree(d_coeff));
     checkCudaErrors(cudaFree(d_res));
+    checkCudaErrors(cudaFree(d_valA));
+    checkCudaErrors(cudaFree(d_csrColPtrA));
+    checkCudaErrors(cudaFree(d_csrRowIndA));
+    checkCudaErrors(cudaFree(d_nnz));
     cudaDeviceReset();
 }
 
 
-
-
-// complete Evaluation on GPU
+// complete Evaluation on GPU using cuBLAS
+// used for comparing to CPU matrix mul, but not important
 template <class Real_t>
 void chebEval(Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>& out, int numPoints)
 {
@@ -742,7 +790,7 @@ void chebEval(Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>& out, int numPoint
   	int num_leaves = tbslas::CountNumLeafNodes(*tree);
   	int cheb_deg;
   	size_t dof;
-	std::vector<pvfmm::Vector<double>> chebdata;
+	std::vector<pvfmm::Vector<double> > chebdata;
 
 	chebdata.reserve(num_leaves);
   	while (n_next != NULL) {
@@ -855,7 +903,7 @@ void chebEval(Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>& out, int numPoint
 	checkCudaErrors(cudaMalloc((void**) &d_buffer2, mem_size_buffers));
 	pvfmm::Profile::Toc();
 	
-	// Init Cublas
+	// Init cuBLAS
 	cublasHandle_t handle;
     cublasCreate(&handle); 
                          
@@ -985,6 +1033,7 @@ void chebEval(Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>& out, int numPoint
 }
 
 // Eval on CPU using Matrix multiplications
+// used for comparison to GPU, but not important
 template <class Real_t>
 void chebEvalCPU(int numPoints, Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>& out) {
 	tbslas::SimConfig* sim_config = tbslas::SimConfigSingleton::Instance();
@@ -1007,7 +1056,7 @@ void chebEvalCPU(int numPoints, Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>&
   	int num_leaves = tbslas::CountNumLeafNodes(*tree);
   	size_t dof;
   	int cheb_deg;
-	std::vector<pvfmm::Vector<double>> chebdata;
+	std::vector<pvfmm::Vector<double> > chebdata;
 
 	chebdata.reserve(num_leaves);
   	while (n_next != NULL) {
@@ -1150,7 +1199,7 @@ void chebEvalCPU(int numPoints, Tree_t* tree, Real_t* in, pvfmm::Vector<Real_t>&
 	pvfmm::Profile::Toc();
 }
 
-// compare Eval on GPU and CPU
+// compare Eval on GPU and CPU, matrix multiplication
 void compareEvaluations(Tree_t* tvel, double* coords, int num_points)
 {
 	pvfmm::Vector<double> cpu_out;
@@ -1226,6 +1275,48 @@ void compareNodeFieldFunctors(Tree_t* tvel, double* point_pos, int num_points, i
 	
 }
 
+// compare CPU NodeFieldFunctor and GPU NodeFieldFunctor (using vec_eval)
+template <typename Tree, class Real_t>
+void compareNodeFieldFunctors_vec_eval(Tree* tvel, Real_t* point_pos, int num_points, int dof)
+{
+	Real_t* cpu_out = new Real_t[num_points*dof];
+	
+	
+	// Evaluation on CPU
+	{
+	tbslas::NodeFieldFunctor<Real_t,Tree> field_fn = tbslas::NodeFieldFunctor<Real_t,Tree>(tvel);
+	
+	field_fn(point_pos, num_points, cpu_out);
+	
+	}
+	
+	Real_t* gpu_out = new Real_t[num_points*dof];
+	//Evaluation on GPU
+	{
+	tbslas::NodeFieldFunctor_cuda_vec<Real_t,Tree> field_fn_cuda = tbslas::NodeFieldFunctor_cuda_vec<Real_t,Tree>(tvel);
+	
+	field_fn_cuda(point_pos, num_points, gpu_out);	
+	
+	}
+			
+	// check for correctness
+	bool passed = true;
+	double tolerance = 1e-6f;
+	
+    for (int i = 0; i < num_points*dof; i++)
+    {
+		//std::cout << "cpu_out: " << cpu_out[i] << "gpu_out: " << gpu_out[i] << std::endl;
+		if (std::abs(cpu_out[i] - gpu_out[i]) > tolerance) {	
+			std::cout << "cpu_out: " << cpu_out[i] << "gpu_out: " << gpu_out[i] << std::endl;	
+			passed = false;
+			std::cout << "Fail at i: " << i << std::endl;
+			break;
+		}
+	}     
+	if (passed == true)
+	std::cout << "Evaluation passed tolerance" << std::endl;
+}
+
 // wraper for gaussian kernel
 template <class Real_t>
 void get_gaussian_kernel_wraper(const Real_t* coord,
@@ -1237,7 +1328,6 @@ void get_gaussian_kernel_wraper(const Real_t* coord,
   tbslas::gaussian_kernel(coord, n, out, xc, yc, zc);
 
 }
-
 
 int main (int argc, char **argv) {
 	MPI_Init(&argc, &argv);
@@ -1252,7 +1342,9 @@ int main (int argc, char **argv) {
 	
 	
 	int   test = strtoul(commandline_option(argc, argv, "-test",     "1", false,
-                                          "-test <int> = (1)      : 1 - NFF vel, 2 - NFF gauss, 3 - eval vel, 4 - matrix mul, 5 - chebPoly"),NULL,10);
+                                          "-test <int> = (1)      : 1 - NFF vel (matrix mul), 2 - NFF gauss (matrix mul), 3 - compare matrix mul evaluation, \
+                                           4 - matrix mul comparisons (CPU, cuBLAS, cuSPARSE), 5 - chebPoly comparison, 6 - NFF vorticity field (vector evaluation), \
+                                           7 - NFF Gaussian function (vector evaluation), 8 - NFF Hopf field (vector evaluation)"),NULL,10);
 	int   numEvPoints = strtoul(commandline_option(argc, argv, "-numEvP",     "1", false,
                                           "-numEvP <int> = (1)    : how many points for evaluation"),NULL,10);
     int   degree = strtoul(commandline_option(argc, argv, "-degree",     "14", false,
@@ -1281,7 +1373,7 @@ int main (int argc, char **argv) {
 	fn_vel_f = tbslas::get_vorticity_field<float,3>;
 	fn_val = get_gaussian_kernel_wraper<double>;
     
-	
+	fn_vel2 = get_hopf_field_wrapper<double>;
 	// =========================================================================
     // CONSTRUCT TREE
     // =========================================================================
@@ -1289,6 +1381,8 @@ int main (int argc, char **argv) {
     // Create velocity tree
     int max_depth_vel=0;
     Tree_t tvel(comm);
+    if (test == 6)
+    {
     tbslas::ConstructTree<Tree_t>(sim_config->tree_num_point_sources,
                                   sim_config->tree_num_points_per_octanct,
                                   sim_config->tree_chebyshev_order,
@@ -1299,6 +1393,22 @@ int main (int argc, char **argv) {
                                   fn_vel,
                                   3,
                                   tvel);
+	}
+	else
+	{
+	tbslas::ConstructTree<Tree_t>(sim_config->tree_num_point_sources,
+                                  sim_config->tree_num_points_per_octanct,
+                                  sim_config->tree_chebyshev_order,
+                                  max_depth_vel?max_depth_vel:sim_config->tree_max_depth,
+                                  sim_config->tree_adap,
+                                  sim_config->tree_tolerance,
+                                  comm,
+                                  fn_vel2,
+                                  3,
+                                  tvel);	
+		
+	}
+	
 	
 	// gaussian 	
 	Tree_t tgauss(comm);
@@ -1323,6 +1433,7 @@ int main (int argc, char **argv) {
 	  
 	}   	
 	
+	
 	if (sim_config->vtk_save_rate) {
 	
       //tree.Write2File(tbslas::GetVTKFileName(0, sim_config->vtk_filename_variable).c_str(),
@@ -1332,6 +1443,7 @@ int main (int argc, char **argv) {
 	tvel.Write2File(fname,
                       sim_config->vtk_order);
     }
+    
     
     FILE* file;
     
@@ -1349,20 +1461,30 @@ int main (int argc, char **argv) {
 			file = freopen("output_test3.txt","w",stdout);
 			break;
 		case(4): // compare single matrix multiplication
-			matrixMul_Manypoints(num_points, degree);
+			matrixMul_Manypoints_mul1(num_points, degree);
 			file = freopen("output_test4.txt","w",stdout);
 			break;
 		case(5): // compare chebyshev polynomial computation
-			chebPoly(degree, xtmp.data(), num_points);
-			chebPoly_shared(degree, xtmp.data(), num_points);
+			chebPoly(degree, &xtmp[0], num_points);
 			file = freopen("output_test5.txt","w",stdout);
 			break;
+		case(6): // compare NFF with velocity tree (vec_eval)
+			compareNodeFieldFunctors_vec_eval(&tvel, &xtmp[0], num_points, 3);	
+			file = freopen("output_test6.txt","w",stdout);		
+			break;
+		case(7): // compare NFF with gaussian tree (vec_eval)
+			compareNodeFieldFunctors_vec_eval(&tgauss, &xtmp[0], num_points, 1);	
+			file = freopen("output_test7.txt","w",stdout);		
+			break;
+		case(8): // compare NFF with hopf field tree (vec_eval)
+			compareNodeFieldFunctors_vec_eval(&tvel, &xtmp[0], num_points, 3);	
+			file = freopen("output_test8.txt","w",stdout);		
+			break;	
 		default:			
 			break;
 	}
     
-    // test which GEMM works best
-    //matrixMulTests();
+ 
     
 	// =========================================================================
     // COMPUTE ERROR
@@ -1414,8 +1536,7 @@ int main (int argc, char **argv) {
   
   //Output Profiling results.
    pvfmm::Profile::print(&comm);
-   fclose (stdout);
-  // clean up 	
+   fclose (stdout);	
   
 
   // Shut down MPI
