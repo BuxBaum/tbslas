@@ -1,0 +1,30 @@
+INSTALLATION INSTRUCTIONS
+
+--------------------------------------------------------------
+
+PVFMM needs to be configured using following flags and these or corresponding locations/names:
+MPICXX="mpiicpc"
+CXXFLAGS="$MKL_INC -L$MKL_LIBDIR -DFFTW3_MKL"
+--with-fftw-include="$MKL_INCDIR/fftw"
+--with-fftw-lib="-mkl"
+--with-cuda= cuda location
+ LIBS= cuda library folder with libcuda.so, libcublas.so and libcusparse.so
+ 
+Using the LRZ MAC Cluster following configure instruction should work:
+./configure MPICXX="mpiicpc" CXXFLAGS="$MKL_INC -L$MKL_LIBDIR -DFFTW3_MKL" --with-fftw-include="$MKL_INCDIR/fftw" --with-fftw-lib="-mkl" --with-cuda="/lrz/sys/parallel/cuda/6.5/cuda" LIBS="-L/lrz/sys/parallel/cuda/6.5/cuda/lib64/stubs"
+
+-------------------------------------------------------------
+
+In the MAKEFILE in /examples:
+specify CUDA_INCLUDES with folder including helper_cuda.h and helper_functions.h
+set -gencode arch=XXXX,code=XXXX according to GPU architecture (see http://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#options-for-steering-gpu-code-generation)
+
+-------------------------------------------------------------
+
+Required Software:
+mkl, mpi, CUDA
+
+On the MAC Cluster it works with:
+ 1) admin/1.0      4) mkl/11.3       7) cuda/6.5
+ 2) tempdir/1.0    5) mpi.intel/5.1  8) fftw/mpi/3.3
+ 3) intel/16.0     6) lrz/default    9) doxygen/1.8

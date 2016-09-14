@@ -1,0 +1,1 @@
+This folder includes some performance tests executed on the LRZ MAC Cluster
